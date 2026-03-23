@@ -1,0 +1,649 @@
+ // screens/booking_screen.dart
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:dio/dio.dart';
+import 'package:maalife/model/doctor_model.dart';
+import 'package:maalife/screens/booking_confirmation_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:maalife/api/api.dart';
+import 'dart:convert';
+
+class BookingScreen extends StatefulWidget {
+  final Doctor doctor;
+
+  const BookingScreen({super.key, required this.doctor});
+
+  @override
+  State<BookingScreen> createState() => _BookingScreenState();
+}
+
+class _BookingScreenState extends State<BookingScreen> {
+  static const Color primaryColor = Color(0xFF09BBAF);
+  late ApiServiceImpl api;
+  List<String> _bookedSlots = [];
+
+
+  String? doctorId;
+
+  final Dio dio = Dio(BaseOptions(
+    baseUrl: "https://riyoceline.com/projects/synapse/index.php/api/",
+  ));
+
+  DateTime _selectedDate = DateTime.now();
+  TimeOfDay? _selectedTime;
+  final TextEditingController _symptomsController = TextEditingController();
+
+  List<TimeOfDay> _availableSlots = [];
+  Map<String, dynamic> doctorSlots = {};
+  List<String> _doctorLeaves = []; // Leave dates in 'YYYY-MM-DD'
+
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    initApi();
+    loadDoctorId();
+  }
+
+  Future<void> initApi() async {
+    api = await ApiServiceImpl.create();
+  }
+
+
+  void validateSelectedDate() {
+    DateTime checkDate = _selectedDate;
+
+    List<DateTime> leaveDates = _doctorLeaves.map((e) {
+      final parts = e.split("-");
+      return DateTime(
+        int.parse(parts[0]),
+        int.parse(parts[1]),
+        int.parse(parts[2]),
+      );
+    }).toList();
+
+    List<int> availableWeekdays = doctorSlots.entries
+        .where((entry) => (entry.value as String).isNotEmpty)
+        .map((entry) {
+      switch (entry.key.toLowerCase()) {
+        case 'monday':
+          return DateTime.monday;
+        case 'tuesday':
+          return DateTime.tuesday;
+        case 'wednesday':
+          return DateTime.wednesday;
+        case 'thursday':
+          return DateTime.thursday;
+        case 'friday':
+          return DateTime.friday;
+        case 'saturday':
+          return DateTime.saturday;
+        case 'sunday':
+          return DateTime.sunday;
+        default:
+          return 0;
+      }
+    }).where((d) => d != 0).toList();
+
+    while (
+    leaveDates.any((d) =>
+    d.year == checkDate.year &&
+        d.month == checkDate.month &&
+        d.day == checkDate.day) ||
+        !availableWeekdays.contains(checkDate.weekday)) {
+      checkDate = checkDate.add(const Duration(days: 1));
+    }
+
+    _selectedDate = checkDate;
+  }
+
+  /// LOAD DOCTOR ID AND FETCH DATA
+  Future<void> loadDoctorId() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // Use getString instead of getInt
+    doctorId = prefs.getString('patient_doctor_id');
+
+    print("Saved Doctor ID: $doctorId");
+
+    if (doctorId != null) {
+      await Future.wait([
+        fetchDoctorSlots(doctorId!),
+        fetchDoctorLeaves(doctorId!),
+      ]);
+      validateSelectedDate();
+      updateSlotsForSelectedDay();
+    }
+
+    setState(() {
+      isLoading = false;
+    });
+  }
+
+  Future<void> fetchBookedSlots(String doctorId, String date) async {
+    try {
+      print("Fetching booked slots...");
+      print("Doctor ID: $doctorId");
+      print("Date: $date");
+
+      Response response = await dio.post(
+        "GetBookedSlots",
+        data: FormData.fromMap({
+          "doctor_id": doctorId,
+          "appointment_date": date,
+        }),
+      );
+
+      print("Raw API Response: ${response.data}");
+
+      Map<String, dynamic> data;
+
+      // Convert String → Map if necessary
+      if (response.data is String) {
+        data = jsonDecode(response.data);
+      } else {
+        data = Map<String, dynamic>.from(response.data);
+      }
+
+      if (data['status'] == true) {
+        List<dynamic> slots = data['booked_slots'] ?? [];
+
+        _bookedSlots = slots.map((e) => e.toString()).toList();
+
+        print("Parsed booked slots: $_bookedSlots");
+      } else {
+        _bookedSlots = [];
+        print("No booked slots returned");
+      }
+
+    } catch (e) {
+      print("Error fetching booked slots: $e");
+      _bookedSlots = [];
+    }
+  }
+  /// FETCH TIME SLOTS
+  Future<void> fetchDoctorSlots(String doctorId) async {
+    try {
+      Response response = await dio.post(
+        "GetDoctorTimeSlots",
+        data: {"doctor_id": doctorId},
+      );
+
+      if (response.data['status'] == true && response.data['data'] is Map) {
+        doctorSlots = Map<String, dynamic>.from(response.data['data']);
+      } else {
+        doctorSlots = {};
+      }
+
+      updateSlotsForSelectedDay();
+    } catch (e) {
+      print("API Error: $e");
+      doctorSlots = {};
+      _availableSlots = [];
+    }
+  }
+
+  /// FETCH DOCTOR LEAVES
+  Future<void> fetchDoctorLeaves(String doctorId) async {
+    try {
+      Response response = await dio.post(
+        "GetDoctorTimeSlots",
+        data: FormData.fromMap({
+          "doctor_id": doctorId,
+        }),
+      );
+
+      print("Leaves API Response: ${response.data}");
+
+      if (response.data is Map && response.data['status'] == true) {
+        var leavesData = response.data['leaves'];
+
+        if (leavesData is List) {
+          _doctorLeaves = leavesData.map((e) => e.toString()).toList();
+        } else {
+          _doctorLeaves = [];
+        }
+      } else {
+        _doctorLeaves = [];
+      }
+
+      print("Parsed Leaves: $_doctorLeaves");
+
+    } catch (e) {
+      print("Error fetching leaves: $e");
+      _doctorLeaves = [];
+    }
+  }
+
+  /// UPDATE SLOT BASED ON SELECTED DATE
+  void updateSlotsForSelectedDay() {
+    String day = getDayName(_selectedDate);
+
+    if (doctorSlots.containsKey(day)) {
+      String slotString = doctorSlots[day] ?? "";
+
+      if (slotString.isEmpty) {
+        setState(() => _availableSlots = []);
+        return;
+      }
+
+      List<String> slots = slotString.split(",");
+
+      setState(() {
+        _availableSlots = slots.map((slot) {
+          final parts = slot.split(":");
+          return TimeOfDay(
+            hour: int.parse(parts[0]),
+            minute: int.parse(parts[1]),
+          );
+        }).toList();
+
+        if (_availableSlots.isNotEmpty) {
+          _selectedTime = _availableSlots.first;
+        }
+      });
+    } else {
+      setState(() {
+        _availableSlots = [];
+      });
+    }
+  }
+
+  /// GET DAY NAME
+  String getDayName(DateTime date) {
+    switch (date.weekday) {
+      case 1:
+        return "monday";
+      case 2:
+        return "tuesday";
+      case 3:
+        return "wednesday";
+      case 4:
+        return "thursday";
+      case 5:
+        return "friday";
+      case 6:
+        return "saturday";
+      case 7:
+        return "sunday";
+      default:
+        return "";
+    }
+  }
+
+  /// DATE PICKER WITH LEAVES AND AVAILABLE DAYS
+  Future<void> _selectDate() async {
+    // Convert leave dates to DateTime (Y-M-D only) safely
+    List<DateTime> leaveDateTimes = [];
+    for (var e in _doctorLeaves) {
+      try {
+        // Ensure e is a string
+        String leaveStr = e.toString();
+        final parts = leaveStr.split('-');
+        if (parts.length != 3) continue;
+        leaveDateTimes.add(DateTime(
+          int.parse(parts[0]),
+          int.parse(parts[1]),
+          int.parse(parts[2]),
+        ));
+      } catch (ex) {
+        print("Error parsing leave date '$e': $ex");
+      }
+    }
+
+    // Available weekdays based on slots that actually have times
+    List<int> availableWeekdays = doctorSlots.entries
+        .where((entry) => (entry.value as String).isNotEmpty)
+        .map((entry) {
+      switch (entry.key.toLowerCase()) {
+        case 'monday':
+          return DateTime.monday;
+        case 'tuesday':
+          return DateTime.tuesday;
+        case 'wednesday':
+          return DateTime.wednesday;
+        case 'thursday':
+          return DateTime.thursday;
+        case 'friday':
+          return DateTime.friday;
+        case 'saturday':
+          return DateTime.saturday;
+        case 'sunday':
+          return DateTime.sunday;
+        default:
+          return 0;
+      }
+    }).where((d) => d != 0).toList();
+
+    // Pick a valid initial date
+    DateTime initialDate = _selectedDate;
+    bool isValid = !leaveDateTimes.any((d) =>
+    d.year == initialDate.year &&
+        d.month == initialDate.month &&
+        d.day == initialDate.day) &&
+        availableWeekdays.contains(initialDate.weekday);
+
+    if (!isValid) {
+      initialDate = DateTime.now();
+      while (leaveDateTimes.any((d) =>
+      d.year == initialDate.year &&
+          d.month == initialDate.month &&
+          d.day == initialDate.day) ||
+          !availableWeekdays.contains(initialDate.weekday)) {
+        initialDate = initialDate.add(const Duration(days: 1));
+      }
+    }
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 30)),
+      selectableDayPredicate: (date) {
+        bool isLeave = leaveDateTimes.any((d) =>
+        d.year == date.year && d.month == date.month && d.day == date.day);
+        bool isAvailableWeekday = availableWeekdays.contains(date.weekday);
+        return !isLeave && isAvailableWeekday;
+      },
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: ColorScheme.light(primary: primaryColor),
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (picked != null) {
+
+      await fetchBookedSlots(
+        doctorId!,
+        picked.toIso8601String().split('T')[0],
+      );
+
+      setState(() {
+        _selectedDate = picked;
+        updateSlotsForSelectedDay();
+      });
+    }
+  }
+
+  Future<int> _getPatientId() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    String? patientIdString = prefs.getString('patient_id');
+
+    if (patientIdString == null) return 0;
+
+    return int.tryParse(patientIdString) ?? 0;
+  }
+  Future<int?> _getDoctorId() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // Retrieve as String
+    String? doctorIdString = prefs.getString('patient_doctor_id');
+
+    if (doctorIdString == null) return null;
+
+    // Convert to int
+    int? doctorId = int.tryParse(doctorIdString);
+
+    return doctorId;
+  }
+  /// CONFIRM BOOKING
+  Future<void> _confirmBooking() async {
+    if (_selectedTime == null) return;
+
+    int? doctorId = await _getDoctorId();
+    int patientId = await _getPatientId();
+
+    if (doctorId == null) {
+      print("Doctor ID not found in SharedPreferences");
+      return;
+    }
+
+    Map<String, dynamic> appointmentData = {
+      "appointment_date": _selectedDate.toIso8601String().split('T')[0],
+      "requested_date": DateTime.now().toIso8601String().split('T')[0],
+      "requested_time": "${TimeOfDay.now().hour}:${TimeOfDay.now().minute}",
+      "appointment_time": "${_selectedTime!.hour}:${_selectedTime!.minute}",
+      "patient_id": patientId,
+      "doctor_id": doctorId,
+      "doctor_name": widget.doctor.fullName,
+      "specialization": widget.doctor.specialization,
+      "notes": _symptomsController.text,
+    };
+
+    bool success = await api.saveAppointment(appointmentData);
+
+    if (success) {
+      print("Appointment saved successfully");
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (context) => BookingConfirmationScreen(
+            doctor: widget.doctor,
+            date: _selectedDate,
+            time: _selectedTime!,
+            notes: _symptomsController.text,
+          ),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Failed to save appointment"),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final h = size.height;
+    final w = size.width;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          'Book Appointment',
+          style: GoogleFonts.poppins(
+            fontWeight: FontWeight.w600,
+            color: Colors.white,
+          ),
+        ),
+        backgroundColor: primaryColor,
+      ),
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : SingleChildScrollView(
+        padding: EdgeInsets.all(w * 0.04),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildDoctorSummary(h, w),
+            SizedBox(height: h * 0.03),
+            Text('Select Date',
+                style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+            SizedBox(height: h * 0.01),
+            _buildDateSelector(h),
+            SizedBox(height: h * 0.03),
+            Text('Select Time',
+                style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+            SizedBox(height: h * 0.01),
+            _buildTimeSelector(h, w),
+            SizedBox(height: h * 0.03),
+            Text('Symptoms or Notes (Optional)',
+                style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+            SizedBox(height: h * 0.01),
+            TextField(
+              controller: _symptomsController,
+              maxLines: 3,
+              decoration: InputDecoration(
+                hintText: 'Describe symptoms...',
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+            SizedBox(height: h * 0.04),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: _confirmBooking,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: primaryColor,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: Text(
+                  'Confirm Booking - ₹${widget.doctor.consultationFee}',
+                  style: GoogleFonts.poppins(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDoctorSummary(double h, double w) {
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: EdgeInsets.all(w * 0.04),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: h * 0.035,
+              backgroundImage: widget.doctor.profilePhoto.isNotEmpty
+                  ? NetworkImage(widget.doctor.profilePhoto)
+                  : null,
+              child: widget.doctor.profilePhoto.isEmpty
+                  ? const Icon(Icons.person)
+                  : null,
+            ),
+            SizedBox(width: w * 0.04),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(widget.doctor.fullName,
+                      style: GoogleFonts.poppins(
+                          fontWeight: FontWeight.w600)),
+                  Text(widget.doctor.specialization),
+                  Text(widget.doctor.hospitalName,
+                      style: const TextStyle(fontSize: 12)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDateSelector(double h) {
+    return GestureDetector(
+      onTap: _selectDate,
+      child: Container(
+        padding: EdgeInsets.all(h * 0.02),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.grey[300]!),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('${_selectedDate.day}/${_selectedDate.month}/${_selectedDate.year}'),
+            const Icon(Icons.calendar_today, color: primaryColor),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTimeSelector(double h, double w) {
+    if (_availableSlots.isEmpty) {
+      return const Text("No slots available for this day");
+    }
+
+    String formatTime(TimeOfDay time) {
+      final hour = time.hourOfPeriod == 0 ? 12 : time.hourOfPeriod;
+      final minute = time.minute.toString().padLeft(2, '0');
+      final period = time.period == DayPeriod.am ? "AM" : "PM";
+      return "$hour:$minute $period";
+    }
+
+    return Wrap(
+      spacing: w * 0.03,
+      runSpacing: h * 0.015,
+      children: _availableSlots.map((slot) {
+
+        String slotString = formatTime(slot);
+
+        bool isBooked = _bookedSlots.contains(slotString);
+        bool isSelected = slot == _selectedTime;
+
+        return GestureDetector(
+          onTap: isBooked
+              ? null
+              : () {
+            setState(() {
+              _selectedTime = slot;
+            });
+          },
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: w * 0.05,
+              vertical: h * 0.015,
+            ),
+            decoration: BoxDecoration(
+              color: isBooked
+                  ? Colors.grey
+                  : isSelected
+                  ? primaryColor
+                  : Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.grey[300]!),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  slotString,
+                  style: TextStyle(
+                    color: isBooked
+                        ? Colors.white
+                        : isSelected
+                        ? Colors.white
+                        : Colors.black,
+                  ),
+                ),
+                if (isBooked)
+                  const Text(
+                    "BOOKED",
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  )
+              ],
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+}

@@ -1,0 +1,49 @@
+<script>
+
+let arr1 = [1, 2, 2, 3, 4, 4, 5];
+let unique = [];
+
+for (let i = 0; i < arr1.length; i++) {
+  let isDuplicate = false;
+
+  // Check if element already exists in unique array
+  for (let j = 0; j < unique.length; j++) {
+    if (arr1[i] === unique[j]) {
+      isDuplicate = true;
+      break;
+    }
+  }
+
+  // If not duplicate, add to unique array
+  if (!isDuplicate) {
+    unique.push(arr1[i]);
+  }
+}
+
+document.write(unique); // [1, 2, 3, 4, 5]
+
+document.write("<hr>");
+let str = "helloworld";
+let count = {};
+
+for (let i = 0; i < str.length; i++) {
+  let char = str[i];
+
+  if (count[char]) {
+    count[char]++;
+  } else {
+    count[char] = 1;
+  }
+}
+
+for (let key in count) {
+  document.write(key + " = " + count[key] + "<br>");
+}
+
+
+
+
+
+
+</script> 
+
